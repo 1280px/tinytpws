@@ -1,0 +1,92 @@
+#!/bin/sh /etc/rc.common
+
+TPWS_DEFAULT=/tmp/tpws
+TPWS_USER_DEFAULT=daemon
+URL_CHECK='https://www.google.com/tia/tia.png'
+URL_TTPWS=''
+
+START=99
+STOP=01
+USE_PROCD=1
+
+wait_for_inet()
+{
+	sleep 30 # TODO: придумать более элегантный способ проверки наличия сети
+
+	if ! uclient-fetch "$URL_CHECK" -O /dev/null --timeout 5; then
+		return 1
+	fi
+
+	return 0
+}
+
+download_tpws()
+{
+	echo 'Checking Internet connection...' >> '/root/ttpws.log'
+	if ! wait_for_inet; then
+		echo 'Failed to establish connection!' >> '/root/ttpws.log'
+		return 1
+	fi
+
+	echo 'Downloading package to /tmp...' >> '/root/ttpws.log'
+	if ! uclient-fetch "$URL_TTPWS" -P /tmp -O ttpws.tar.gz; then
+		echo 'Failed to download package!!!' >> '/root/ttpws.log'
+		return 1
+	fi
+
+	# Если делать распаковку сразу из .tar.gz, может не хватить выделенной оперативки!
+	gzip -dc /tmp/ttpws.tar.gz > /tmp/ttpws.tar || {
+		echo 'Failed to extract gz!' >> '/root/ttpws.log'
+		return 1
+	}
+	tar -xf /tmp/ttpws.tar -C /tmp || {
+		echo 'Failed to extract tar!' >> '/root/ttpws.log'
+		return 1
+	}
+	rm /tmp/ttpws.*
+	chmod +x /tmp/tpws
+
+	if [ -e /etc/tpws-no-config-update ]; then
+		echo 'Found tpws-no-config-update, config update skipped' >> '/root/ttpws.log'
+	else
+		mv /tmp/tpws-config /etc/config/tpws
+		mv /tmp/tpws-whitelist /etc/tpws-whitelist
+	fi
+
+	return 0
+}
+
+tpws_instance()
+{
+	config_get "$@"
+
+	local enabled port opt
+	config_get_bool enabled "$1" enabled 0
+	[ "$enabled" -eq 1 ] || return 1
+
+	config_get port "$1" port
+	config_get opt "$1" opt
+	local COMMAND="$TPWS --user=$TPWS_USER --port=$port $opt"
+
+	procd_open_instance
+	procd_set_param command $COMMAND
+	procd_close_instance
+}
+
+start_service()
+{
+	echo -e "\n$(date)" >> '/root/ttpws.log'
+
+	if ! download_tpws; then
+		echo 'Services start aborted.' >> '/root/ttpws.log'
+		return 1
+	fi
+
+	echo 'Download OK, starting services...' >> '/root/ttpws.log'
+	config_load tpws
+	config_get TPWS_USER defaults user $TPWS_USER_DEFAULT
+	config_get TPWS defaults tpws $TPWS_DEFAULT
+	config_foreach tpws_instance tpws
+
+	/etc/tpws-firewall.sh
+}
